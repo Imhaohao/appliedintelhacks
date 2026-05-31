@@ -1,0 +1,189 @@
+"use client";
+
+import { Card, CardHeader } from "@/components/ui/Card";
+import { Pill } from "@/components/ui/Pill";
+import { LoadingProgress, useElapsedSeconds } from "./LoadingProgress";
+import { formatMoney, cn } from "@/lib/utils";
+import type {
+  EscrowDoc,
+  LifecycleEventDoc,
+  SettledPayload,
+  TaskDoc,
+} from "@/lib/task-view";
+import { ArrowRight, ArrowLeft } from "@phosphor-icons/react/dist/ssr";
+
+interface Props {
+  task: TaskDoc;
+  escrow: EscrowDoc | null | undefined;
+  events: LifecycleEventDoc[];
+}
+
+export function SettlementPanel({ task, escrow, events }: Props) {
+  const settled = events
+    .filter((e) => e.event_type === "settled")
+    .sort((a, b) => b.timestamp - a.timestamp)[0];
+  // Settlement runs after the verdict lands. Show a brief spinner during
+  // that gap so the page never sits silently.
+  const verdictLanded = events.find((e) => e.event_type === "judge_verdict");
+  const elapsed = useElapsedSeconds(
+    verdictLanded && !settled ? verdictLanded.timestamp : undefined,
+  );
+
+  if (!settled) {
+    if (!verdictLanded) return null;
+    return (
+      <Card className="animate-fade-up">
+        <CardHeader
+          title="Settlement"
+          meta={<Pill tone="info" pulse>Settling</Pill>}
+        />
+        <LoadingProgress
+          label="Releasing escrow + applying reputation"
+          status="Updating the escrow ledger and writing the reputation delta to the agent's record."
+          elapsedSeconds={elapsed}
+          tone="info"
+        />
+      </Card>
+    );
+  }
+
+  const payload = settled.payload as unknown as SettledPayload;
+  const released = payload.escrow === "released";
+
+  return (
+    <Card className="animate-fade-up">
+      <CardHeader
+        title="Settlement"
+        meta={
+          <Pill tone={released ? "success" : "danger"}>
+            {released ? "Released" : "Refunded"}
+          </Pill>
+        }
+      />
+
+      <div className="mb-5 grid grid-cols-3 items-center gap-3 text-center text-sm">
+        <Stop label="Buyer" sub={escrow?.buyer_id ?? "—"} />
+        <Arrow
+          amount={
+            payload.price_paid ?? task.price_paid ?? escrow?.locked_amount ?? 0
+          }
+          direction={released ? "forward" : "backward"}
+        />
+        <Stop
+          label={released ? "Seller" : "Buyer (refund)"}
+          sub={released ? payload.seller_id : escrow?.buyer_id ?? "—"}
+          highlight={released}
+        />
+      </div>
+
+      {/* Opsera security badge */}
+      {task.scan_result && (
+        <div className={cn(
+          "mb-3 flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium",
+          (task.scan_result as { passed: boolean }).passed
+            ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+            : "border-rose-200 bg-rose-50 text-rose-700",
+        )}>
+          <span>
+            {(task.scan_result as { passed: boolean }).passed
+              ? "✓ Opsera: secure"
+              : "✗ Opsera: security hold"}
+          </span>
+          {!(task.scan_result as { passed: boolean }).passed && (
+            <span className="ml-auto text-xs opacity-75">
+              {(task.scan_result as { severitySummary: { critical: number; high: number } }).severitySummary.critical}C /
+              {" "}{(task.scan_result as { severitySummary: { critical: number; high: number } }).severitySummary.high}H findings — escrow held
+            </span>
+          )}
+          {(task.scan_result as { skipped?: boolean }).skipped && (
+            <span className="ml-auto text-xs opacity-60">scan unavailable</span>
+          )}
+        </div>
+      )}
+
+      {/* Replay link when world-state is on Tigris */}
+      {task.world_state_tigris_key && (
+        <div className="mb-3">
+          <a
+            href={`https://${process.env.NEXT_PUBLIC_TIGRIS_BUCKET ?? "agora-artifacts"}.fly.storage.tigris.dev/${task.world_state_tigris_key}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 rounded-lg border border-brand-200 bg-brand-50 px-3 py-1.5 text-xs font-medium text-brand-700 transition-colors hover:bg-brand-100"
+          >
+            ↩ Replay this run
+          </a>
+        </div>
+      )}
+
+      <div className="rounded-xl bg-surface-subtle p-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-xs text-ink-muted">Reputation update</div>
+            <div className="font-mono text-sm text-ink">
+              {payload.seller_id}
+            </div>
+          </div>
+          <div className="flex items-center gap-3 font-mono">
+            <span
+              className={cn(
+                "animate-value-pop text-lg font-semibold tracking-tight",
+                payload.delta >= 0 ? "text-emerald-600" : "text-rose-600",
+              )}
+            >
+              {payload.delta >= 0 ? "+" : ""}
+              {payload.delta.toFixed(3)}
+            </span>
+            <span className="text-ink-subtle">→</span>
+            <span className="text-ink">{payload.new_score.toFixed(2)}</span>
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function Stop({
+  label,
+  sub,
+  highlight = false,
+}: {
+  label: string;
+  sub: string;
+  highlight?: boolean;
+}) {
+  return (
+    <div
+      className={cn(
+        "rounded-xl p-3 text-left",
+        highlight ? "bg-brand-50" : "bg-surface-subtle",
+      )}
+    >
+      <div className="text-xs text-ink-muted">{label}</div>
+      <div className="mt-0.5 truncate font-mono text-sm text-ink">{sub}</div>
+    </div>
+  );
+}
+
+function Arrow({
+  amount,
+  direction,
+}: {
+  amount: number;
+  direction: "forward" | "backward";
+}) {
+  return (
+    <div className="flex flex-col items-center justify-center text-xs text-ink-muted">
+      <div className="font-mono text-sm text-ink">{formatMoney(amount)}</div>
+      <div className="my-1 text-brand-600">
+        {direction === "forward" ? (
+          <ArrowRight size={20} weight="bold" />
+        ) : (
+          <ArrowLeft size={20} weight="bold" />
+        )}
+      </div>
+      <div className="text-xs text-ink-muted">
+        {direction === "forward" ? "Released" : "Refunded"}
+      </div>
+    </div>
+  );
+}
